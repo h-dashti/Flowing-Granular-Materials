@@ -1,0 +1,298 @@
+#########################
+#                       #
+#                       #
+# Main input params     #
+#                       #
+#                       #
+#########################
+
+
+
+
+variable        Nparticles        equal 512      # Number of particles = 64 128 256 512 1024 4096 16384  65536
+
+variable        phi               equal 0.84            # desired final packing fraction in 2d
+
+variable        NsmallPart        equal floor(0.5*${Nparticles}) # Number of small particles with radius radS
+
+variable        NlargePart        equal ${NsmallPart}            # Number of large particles with radius radB
+
+variable        DIM               equal 2                        # simulation is 2d
+
+variable        ts                equal 1e-3                     # time step for integration
+
+variable	IntegrationSteps 	equal	5e7		# Number of integration steps
+
+##  Seeds for random placement of particles ##
+
+variable        SEED_RAND  equal  83910                 # seed (positive integer) 83910
+
+variable        SEED_RAND_SMALL  equal ${SEED_RAND}     	# seed for small particles
+variable        SEED_RAND_LARGE  equal ${SEED_RAND}+10	# seed for large particles
+
+
+#variable        SEED_RAND2  equal ${SEED_RAND}+10   # seed for large particles
+
+
+## INPUT AND OUTPUT DIRECTORIES AND FILES
+
+variable	final_restart_dir	string	"./lammps_packings/N_512/phi_0.84"
+variable	final_restart_fname	string	"pack.restart_N_512_phi_0.84_DistSeed_83910"
+
+
+#########################
+#                       #
+#                       #
+# Initial Setup for     #
+#    Data Processing    #
+#                       #
+#########################
+
+
+
+
+
+
+
+#########################
+#                       #
+#                       #
+# General input params  #
+#                       #
+#                       #
+#########################
+
+## Radius ##
+
+variable	radS 	equal 0.5
+variable	radB	equal 0.7 
+
+## Diameter ##
+
+variable        diaS    equal 1.0    # ${radS}*2
+variable        diaB    equal 1.4    # ${radB}*2
+
+
+
+## Normal elastic cte Spring ##
+
+variable	knAbs   	equal 1.0
+
+## Dissipative constant Damp ##
+
+variable	gammanAbs	equal 1.0 
+
+## Distance from particle to form neighbor list ##
+
+variable	neighborSize	equal 1.5*${radS}
+
+variable	i universe 1
+
+
+variable	L	equal	sqrt((${NsmallPart}*PI*${radS}*${radS}+${NlargePart}*PI*${radB}*${radB})/${phi})
+
+variable	HalfBox equal 	${L}/2
+
+variable EveryNDump equal round(${IntegrationSteps}/10.) # 60 fps ~ 30 sec movie = 1800 frames
+
+variable NthermoEvery equal  10000000
+
+#########################
+#                       #
+#                       #
+# General syst. params  #
+#                       #
+#                       #
+#########################
+
+
+dimension       ${DIM}
+
+atom_style	sphere 
+atom_modify     map array
+boundary	p p p
+newton		off
+
+comm_modify	vel yes
+
+units		si
+
+#neighbor	${neighborSize} bin
+#neigh_modify	delay 0
+
+neighbor 0.3 bin
+neigh_modify delay 1 every 1 one 100000 page 1000000 check yes
+
+processors 1 * 1
+
+
+#########################
+#                       #
+#                       #
+#    Insert particles   #
+#                       #
+#                       #
+#########################
+
+## Initial box length is 2 * L where L is the final box length ##
+
+variable InitialBoxHalfLength equal ${L}
+variable zDom                 equal 0.35136
+
+region BoxRegion block -${InitialBoxHalfLength} ${InitialBoxHalfLength} -${InitialBoxHalfLength} ${InitialBoxHalfLength}  -1.0 1.0 #-${zDom} ${zDom}
+create_box 2 BoxRegion
+
+# create random seed for seeding particles
+
+create_atoms 1 random ${NsmallPart} ${SEED_RAND_SMALL} NULL # type 1 is small particle
+create_atoms 2 random ${NlargePart} ${SEED_RAND_LARGE} NULL # type 2 is big particle
+
+## Mass = area = PI * r ^2 ##
+
+variable MSmall equal ${radS}*${radS}*PI
+variable MBig	equal ${radB}*${radB}*PI
+
+# Assign atom properties
+
+set type 1	 mass	 ${MSmall} diameter ${diaS}
+set type 2	 mass	 ${MBig}   diameter ${diaB}
+
+# If enforced 2D, z coordinates doesn't matter but for clarity of data
+
+set group all z 0
+
+#########################
+#                       #
+#                       #
+# Inter-particle force  #
+#                       #
+#                       #
+#########################
+
+
+## soft is a force = 4* PI * /r_c sin( PI r / rc ) ##
+## This force is smooth force to remove overlaps   ##
+
+pair_style      soft 1.4
+
+pair_coeff	* * 10.0
+
+pair_coeff	1 1 10.0 1.0 # S - S pair cutoff 1.0
+
+pair_coeff	1 2 10.0 1.2 # S - B pair cutoff 1.2
+
+pair_coeff	2 2 10.0 1.4 # B - B pair cutoff 1.4
+
+## We need dynamics for minimization, So let's add dynamics here ##
+
+fix		PreTreatment1 all nve/sphere #disc
+fix		PreTreatment2 all enforce2d
+
+# Minimization (It MUST be done since we randomly seeded particles)
+
+thermo 100
+
+minimize 0 0 10000 10000  ##  U_threshold F_threshold Ntrials Ntrials ##
+
+reset_timestep 0
+
+unfix PreTreatment1
+unfix PreTreatment2
+
+
+## Revert to original force law ##
+## This my force law, which is a linear force with dissipative during collision ##
+
+
+pair_style      gran/hooke ${knAbs} 0 ${gammanAbs} 0 0 0
+pair_coeff	* *
+
+## Again minimize to remove any overlap ##
+
+minimize 1e-8 1e-12 10000 10000
+
+reset_timestep 0
+
+
+
+
+#########################
+#                       #
+#                       #
+#      Computes         #
+#                       #
+#                       #
+#########################
+
+# I use this integration scheme which works fine for granular systems
+
+compute realtemp all temp/sphere dof all
+
+thermo ${NthermoEvery}
+thermo_style custom step time ke pe etotal lx ly lz atoms c_realtemp
+
+
+
+#########################
+#                       #
+#                       #
+#    Compress box
+#                       #
+#                       #
+#########################
+
+
+# Setting Dynamics
+
+fix	integr all nve/sphere # dics
+
+fix     stick_id all enforce2d
+
+# Step 1 : Deforming the box
+
+fix	DeformingBox	all 	deform	1	x	final	-${HalfBox}	${HalfBox}	y	final	-${HalfBox}	${HalfBox}	z	final	-1.0 1.0 
+
+#################
+#		#
+#		#
+#      Run	#
+#		#
+#		#
+#################	
+
+timestep	${ts}
+
+run ${IntegrationSteps}
+
+
+
+# Step 2 : freezing the system
+
+unfix DeformingBox # Now Stop deforming -> NVE Only
+
+fix SlowFreezing all viscous 1.0 scale 1 ${radS} scale 2 ${radB}
+
+
+#################
+#		#
+#		#
+#      Run	#
+#		#
+#		#
+#################	
+
+run ${IntegrationSteps}
+
+# reset all velocoties to zero
+
+
+velocity all set 0 0 0
+
+
+
+# write a lammps restart file to be read later by lammps again
+
+variable path_dummy	string	"${final_restart_dir}/${final_restart_fname}"
+write_data  ${path_dummy}
+
+#write_data	MY_ODIR/pack.restart_N_${N}_phi_${phi}_DistSeed_${SEED_RAND}

@@ -1,0 +1,298 @@
+#########################
+#                       #
+#                       #
+# Main input params     #
+#                       #
+#                       #
+#########################
+
+
+
+
+## INPUT AND OUTPUT DIRECTORIES AND FILES
+
+variable	input_dir			string	"./lammps_restart"
+variable	input_fname			string	"pack.restart"
+
+variable	output_dir_pair		string	"./lammps_dumps/pairs"
+variable	output_dir_node		string	"./lammps_dumps/nodes"
+
+variable	output_fname_plist	string	"dump.pairlist"			# fname for pair's info
+variable	output_fname_pforc	string	"dump.pairforc"			# fname for force's info
+variable	output_fname_ninfo	string	"dump.nodeinfo"			# fname for snap's info
+
+
+
+
+
+## Shear rate (box deformations per second) ##
+variable	shearRate			equal	0.001
+
+
+variable	totalStrain			equal 	75.137899  ## In unist of box length ##
+
+variable	Nparticles			equal	512      # Number of particles = 64 128 256 512 1024 4096 16384  65536
+
+
+
+variable	phi					equal	0.84
+
+variable	DistSeed			equal	83910  
+
+
+variable	ts					equal	0.001
+
+variable	DIM					equal	2
+
+
+
+############################################
+
+
+
+
+variable	NsmallPart		equal	floor(0.5*${Nparticles}) 				# Number of small particles with radius radS
+variable	NlargePart		equal	${NsmallPart}            			# Number of large particles with radius radB
+
+
+
+#########################
+#                       #
+#                       #
+# General input params  #
+#                       #
+#                       #
+#########################
+
+
+
+variable	radS 		equal 0.5
+variable	radB		equal 0.7 
+
+variable		L				equal	sqrt((${NsmallPart}*PI*${radS}*${radS}+${NlargePart}*PI*${radB}*${radB})/${phi})
+
+
+
+## Normal elastic cte Spring ##
+
+variable	knAbs   	equal 1.0
+
+## Dissipative constant Damp ##
+
+variable	gammanAbs	equal 1.0 
+
+## define runtime by the #of box deformations -  totalStrain * L     ##
+
+variable       time_one_box_strain equal 	1.0/${shearRate}
+
+variable       runTime				equal 	${totalStrain}*${time_one_box_strain}
+
+## runTime = N * dt                      ##
+## N = #steps integration =  runTime/dt  ##
+
+
+
+variable		runSteps       equal 		floor(${runTime}/${ts})
+
+variable		N_samples		equal		floor(${L}*${totalStrain})
+
+variable		NthermoEvery	equal		round(${runSteps}/100)
+
+
+
+
+## Dump at each dumStep step                 ##
+## at each strain = 1 box size, we want L measurements ##
+
+variable       dumpTime            equal ${time_one_box_strain}/${L}
+
+variable       dumpSteps           equal floor(${dumpTime}/${ts})
+
+
+print "*********************************************************"
+print "!# N_samples=${N_samples} L=${L} totalStrain=${totalStrain}"
+print "!# runTime=${runTime} ts=${ts} runSteps=${runSteps} dumpSteps=${dumpSteps}"
+
+
+## Distance from particle to form neighbor list ##
+
+variable	neighborSize	equal 1.5*${radS}
+
+variable	i universe 1
+
+
+
+
+
+#########################
+#                       #
+#                       #
+# General syst. params  #
+#                       #
+#                       #
+#########################
+
+
+dimension       ${DIM}
+
+atom_style	sphere 
+atom_modify     map array
+boundary	p p p
+newton		off
+
+comm_modify	vel yes
+
+units		si
+
+neighbor	${neighborSize} bin
+neigh_modify	delay 0
+
+processors 1 * 1
+
+#########################
+#                       #
+#                       #
+#    Read Input file    #
+#                       #
+#                       #
+#########################
+
+
+## Read inital packing ##
+
+
+## Read from LIGGGHTS file ##
+
+variable path_dummy	string	"${input_dir}/${input_fname}"
+
+print "!# path_readfile=${path_dummy}"
+print ""
+
+read_data ${path_dummy}
+
+change_box all triclinic remap
+
+#########################
+#                       #
+#                       #
+# Inter-particle force  #
+#                       #
+#                       #
+#########################
+
+
+pair_style      gran/hooke ${knAbs} 0 ${gammanAbs} 0 0 0
+pair_coeff	* *
+
+
+#########################
+#                       #
+#                       #
+#    2D Integration     #
+#                       #
+#                       #
+#########################
+
+
+fix	integr all nve/sphere
+
+fix     stick_id all enforce2d
+
+timestep	${ts}
+
+
+#########################
+#                       #
+#                       #
+#   Pair Computes       #
+#                       #
+#                       #
+#########################
+
+
+compute 1 all property/local patom1 patom2 cutoff radius
+
+compute	2 all pair/local     dist   force  fx fy fz cutoff radius
+
+
+thermo ${NthermoEvery}
+
+#########################
+#                       #
+#                       #
+#    Shearing scheme    #
+#                       #
+#                       #
+#########################
+
+fix boxDeform all deform 1 xy erate ${shearRate} remap v
+
+## 1 means perform box deformation every step ##
+## xy = dv_x/dy                               ##
+## remap v = is used for fluid shear flows    ##
+## variable   currTime equal step*${ts}       ##
+
+
+###################################
+#                                 #
+#                                 # 
+# Linear velo profile at t = 0    #
+#                                 #
+#                                 #
+###################################
+
+
+variable  xVel atom y*${shearRate} 
+
+## Create a linear flow profile at t = 0 ##
+
+fix move1 all move variable NULL NULL NULL v_xVel NULL NULL units box
+
+run 1
+
+unfix move1
+
+#########################
+#                       #
+#                       #
+#      Dumps            #
+#                       #
+#                       #
+#########################
+
+
+
+
+## Index of pairs ##
+
+variable path_dummy	string	"${output_dir_pair}/${output_fname_plist}.*"
+
+dump  dmpl2   all local ${dumpSteps} ${path_dummy} index c_1[1] c_1[2] 
+
+dump_modify dmpl2  pad 10
+
+## Dist & forces between pairs ##
+
+variable path_dummy	string	"${output_dir_pair}/${output_fname_pforc}.*"
+
+dump  dmpl3   all local ${dumpSteps}  ${path_dummy} index c_2[1] c_2[2] c_2[3] c_2[4] c_2[5] 
+
+dump_modify dmpl3  pad 10
+
+## Nodes info ##
+
+variable path_dummy	string	"${output_dir_node}/${output_fname_ninfo}.*" 
+
+dump  dmp3 all custom ${dumpSteps} ${path_dummy} id radius mass x y z vx vy vz omegax omegay omegaz
+
+dump_modify dmp3  pad 10
+
+
+
+## Run ##
+
+run	${runSteps} 
+
+
+
+
